@@ -4,9 +4,12 @@
 # Classes useful in working with MongoDB Atlas
 #
 import json
-import urllib3
 import os
+import time
+from collections import UserDict
+
 import requests
+import urllib3
 
 MONGODB_ATLAS_PUBLIC_KEY = os.getenv("MONGODB_ATLAS_PUBLIC_KEY")
 MONGODB_ATLAS_PRIVATE_KEY = os.getenv("MONGODB_ATLAS_PRIVATE_KEY")
@@ -18,7 +21,7 @@ class AtlasAPI(object):
         orgid=None,
         project=None,
         orgpub=MONGODB_ATLAS_PUBLIC_KEY,
-        orgpriv=MONGODB_ATLAS_PRIVATE_KEY
+        orgpriv=MONGODB_ATLAS_PRIVATE_KEY,
     ):
         if None in [orgpub, orgpriv]:
             raise Exception(
@@ -49,15 +52,17 @@ class AtlasAPI(object):
         thisurl = f"{self.apiurl}/{thisurl}"
         digest = requests.auth.HTTPDigestAuth(self.orgpub, self.orgpriv)
 
-        return requests.post(
-            thisurl,
-            auth=digest,
-            data=data,
-            headers={
-                "Accept": "application/json",
-                "Content-Type": "application/json",
-            },
-        )
+        return requests.post(thisurl, auth=digest, json=data,)
+
+    def patch(self, thisurl, data):
+        """Generic PATCH action. Data should be a dict."""
+        while thisurl[0] == "/":
+            thisurl = thisurl[1:]
+
+        thisurl = f"{self.apiurl}/{thisurl}"
+        digest = requests.auth.HTTPDigestAuth(self.orgpub, self.orgpriv)
+
+        return requests.patch(thisurl, auth=digest, json=data,)
 
     def get(self, thisurl):
         """Generic GET action."""
@@ -71,7 +76,15 @@ class AtlasAPI(object):
             thisurl, auth=digest, headers={"Accept": "application/json"}
         )
 
-    def get_measurement(self, name, granularity='PT1M', period='PT1H', host=None, cluster=None, project=None):
+    def get_measurement(
+        self,
+        name,
+        granularity="PT1M",
+        period="PT1H",
+        host=None,
+        cluster=None,
+        project=None,
+    ):
         """
         MongoDB Atlas claims that they support ISO-8601 time and duration
         formats, but they do not include the standard or summary documentation
@@ -137,7 +150,7 @@ class AtlasAPI(object):
         if r.status_code != 200:
             raise Exception(f"{r.status_code} {r.content}")
 
-        return json.loads(r.content.decode())['results']
+        return json.loads(r.content.decode())["results"]
 
     def getclusterids(self, project=None):
         """Return a list of IDs for clusters in the project"""
@@ -154,8 +167,7 @@ class AtlasAPI(object):
         if r.status_code != 200:
             raise Exception(f"{r.status_code} {r.content}")
 
-        return [x['id'] for x in json.loads(r.content.decode())['results']]
-
+        return [x["id"] for x in json.loads(r.content.decode())["results"]]
 
     def gethosts(self, cluster=None):
         """Retrieve a list of all hosts for the given cluster or all clusters
@@ -167,7 +179,7 @@ class AtlasAPI(object):
 
         hosts = []
         for c in res:
-            if cluster is not None and c['id'] != cluster:
+            if cluster is not None and c["id"] != cluster:
                 continue
             uri = c["mongoURI"]
             for url in uri.split(","):
@@ -175,3 +187,63 @@ class AtlasAPI(object):
                 hosts += [tup.host]
 
         return hosts
+
+    def setldap(
+        self,
+        project,
+        binduser,
+        bindpass,
+        hostname,
+        usertodnmapping=None,
+        port=636,
+    ):
+        """Apply the given AtlasLDAPConfig to the given project.
+
+        project: Atlas project ID
+        binduser: DN for the account to use for binding to the LDAP server
+        bindpass: password for the bind user
+        hostname: FQDN for the LDAP endpoint
+        usertodnmapping: JSON with 'ldapQuery' and 'match' attributes (see Atlas docs)
+        port: 636 for TLS or 389 for unencrypted (default is 636)
+        """
+        # STEP 1: Verify the configuration
+        thisurl = f"/api/atlas/v1.0/groups/{project}/userSecurity/ldap/verify"
+        config = {
+            "bindUsername": binduser,
+            "bindPassword": bindpass,
+            "hostname": hostname,
+            "port": port,
+        }
+        r = self.post(thisurl, config)
+
+        # Poll the response URL until the status changes to something other
+        # than PENDING.
+        requestid = r.json()["requestId"]
+        status = r.json()["status"]
+        respurl = f"{thisurl}/{requestid}"
+        while status == "PENDING":
+            time.sleep(1)
+            r = self.get(respurl)
+            status = r.json()["status"]
+
+        if status != "SUCCESS":
+            return (False, r.json()["validations"])
+
+        # STEP 2: Load the config into Atlas
+        config = {
+            "customerX509": {},
+            "ldap": {
+                "authenticationEnabled": true,
+                "authorizationEnabled": true,
+                "bindUsername": binduser,
+                "bindPassword": bindpass,
+                "hostname": hostname,
+                "port": port,
+                "userToDNMapping": usertodnmapping,
+            },
+        }
+        r = self.patch(thisurl, config)
+        if r.status_code != 202:
+            raise Exception(f"{r.status_code} {r.content}")
+
+        return r.json()
