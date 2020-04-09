@@ -247,3 +247,63 @@ class AtlasAPI(object):
             raise Exception(f"{r.status_code} {r.content}")
 
         return r.json()
+
+
+class AtlasAPIKey(object):
+    def __init__(self, orgid, project, orgpub, orgpriv):
+        self.project = project
+        self.orgpub = orgpub
+        self.orgpriv = orgpriv
+        self.orgid = orgid
+        self.apiurl = "https://cloud.mongodb.com/api/atlas/v1.0"
+        self.public = None
+        self.private = None
+        self.keyid = None
+
+    def create(self):
+        """Create a new API key for the given project."""
+        thisurl = f"{self.apiurl}/groups/{self.project}/apiKeys"
+        digest = requests.auth.HTTPDigestAuth(self.orgpub, self.orgpriv)
+        data = {
+            "desc": "Project API key for automation",
+            "roles": ["GROUP_OWNER"],
+        }
+
+        r = requests.post(thisurl, auth=digest, json=data)
+
+        if r.status_code == 200:
+            dres = r.json()
+            self.public = dres["publicKey"]
+            self.private = dres["privateKey"]
+            self.keyid = dres["id"]
+
+        return (r.status_code, r.content)
+
+    def addcidrblock(self, cidrs, keyid=None):
+        """Add the given list of CIDR blocks to the API key's whitelist.
+
+        cidrs: [ "18.232.0.0/14", "54.174.0.0/15", ... ]
+        keyid: If None, the key ID of the key created by the create() method
+                is used.
+        """
+        if keyid is None:
+            keyid = self.keyid
+        thisurl = f"{self.apiurl}/orgs/{self.orgid}/apiKeys/{keyid}/whitelist"
+
+        data = [{"cidrBlock": x} for x in cidrs]
+        digest = requests.auth.HTTPDigestAuth(self.orgpub, self.orgpriv)
+
+        r = requests.post(thisurl, auth=digest, json=data)
+
+        # It is possible that we get a code 409 ADDRESS_ALREADY_IN_WHITELIST
+        # back from this call, in which case we would need to submit each
+        # individual entry one-by-one. It is unfortunte that the Atlas API does
+        # not allow us to submit them all and just add whatever is NOT already
+        # in the list.
+        pass
+
+        content = r.content
+        if isinstance(r.content, bytes):
+            content = r.content.decode()
+
+        return (r.status_code, content)
